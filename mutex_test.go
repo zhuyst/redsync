@@ -1,11 +1,11 @@
 package redsync
 
 import (
+	"github.com/go-redis/redis"
 	"strconv"
 	"testing"
 	"time"
 
-	"github.com/gomodule/redigo/redis"
 	"github.com/stvp/tempredis"
 )
 

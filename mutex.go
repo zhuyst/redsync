@@ -3,10 +3,10 @@ package redsync
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"github.com/go-redis/redis"
+	"strings"
 	"sync"
 	"time"
-
-	"github.com/gomodule/redigo/redis"
 )
 
 // A DelayFunc is used to decide the amount of time to wait between retries.
@@ -22,14 +22,12 @@ type Mutex struct {
 
 	factor float64
 
-	quorum int
-
 	value string
 	until time.Time
 
 	nodem sync.Mutex
 
-	pools []Pool
+	redisClient *redis.Client
 }
 
 // Lock locks m. In case it returns an error on failure, you may retry to acquire the lock by calling this method again.
@@ -49,19 +47,15 @@ func (m *Mutex) Lock() error {
 
 		start := time.Now()
 
-		n := m.actOnPoolsAsync(func(pool Pool) bool {
-			return m.acquire(pool, value)
-		})
+		acquireSuccess := m.acquire(value)
 
 		until := time.Now().Add(m.expiry - time.Now().Sub(start) - time.Duration(int64(float64(m.expiry)*m.factor)) + 2*time.Millisecond)
-		if n >= m.quorum && time.Now().Before(until) {
+		if acquireSuccess && time.Now().Before(until) {
 			m.value = value
 			m.until = until
 			return nil
 		}
-		m.actOnPoolsAsync(func(pool Pool) bool {
-			return m.release(pool, value)
-		})
+		m.release(value)
 	}
 
 	return ErrFailed
@@ -72,10 +66,7 @@ func (m *Mutex) Unlock() bool {
 	m.nodem.Lock()
 	defer m.nodem.Unlock()
 
-	n := m.actOnPoolsAsync(func(pool Pool) bool {
-		return m.release(pool, m.value)
-	})
-	return n >= m.quorum
+	return m.release(m.value)
 }
 
 // Extend resets the mutex's expiry and returns the status of expiry extension.
@@ -83,10 +74,19 @@ func (m *Mutex) Extend() bool {
 	m.nodem.Lock()
 	defer m.nodem.Unlock()
 
-	n := m.actOnPoolsAsync(func(pool Pool) bool {
-		return m.touch(pool, m.value, int(m.expiry/time.Millisecond))
-	})
-	return n >= m.quorum
+	return m.touch(m.value, int(m.expiry/time.Millisecond))
+}
+
+func (m *Mutex) Acquire() bool {
+	m.nodem.Lock()
+	defer m.nodem.Unlock()
+
+	value, err := m.genValue()
+	if err != nil {
+		return false
+	}
+
+	return m.acquire(value)
 }
 
 func (m *Mutex) genValue() (string, error) {
@@ -98,14 +98,16 @@ func (m *Mutex) genValue() (string, error) {
 	return base64.StdEncoding.EncodeToString(b), nil
 }
 
-func (m *Mutex) acquire(pool Pool, value string) bool {
-	conn := pool.Get()
-	defer conn.Close()
-	reply, err := redis.String(conn.Do("SET", m.name, value, "NX", "PX", int(m.expiry/time.Millisecond)))
-	return err == nil && reply == "OK"
+func (m *Mutex) acquire(value string) bool {
+	reply, err := m.redisClient.SetNX(m.name, value, m.expiry).Result()
+	if err != nil {
+		return false
+	} else {
+		return reply
+	}
 }
 
-var deleteScript = redis.NewScript(1, `
+var deleteScript = redis.NewScript(`
 	if redis.call("GET", KEYS[1]) == ARGV[1] then
 		return redis.call("DEL", KEYS[1])
 	else
@@ -113,14 +115,12 @@ var deleteScript = redis.NewScript(1, `
 	end
 `)
 
-func (m *Mutex) release(pool Pool, value string) bool {
-	conn := pool.Get()
-	defer conn.Close()
-	status, err := deleteScript.Do(conn, m.name, value)
+func (m *Mutex) release(value string) bool {
+	status, err := m.evalScript(deleteScript, m.name, value)
 	return err == nil && status != 0
 }
 
-var touchScript = redis.NewScript(1, `
+var touchScript = redis.NewScript(`
 	if redis.call("GET", KEYS[1]) == ARGV[1] then
 		return redis.call("SET", KEYS[1], ARGV[1], "XX", "PX", ARGV[2])
 	else
@@ -128,25 +128,17 @@ var touchScript = redis.NewScript(1, `
 	end
 `)
 
-func (m *Mutex) touch(pool Pool, value string, expiry int) bool {
-	conn := pool.Get()
-	defer conn.Close()
-	status, err := redis.String(touchScript.Do(conn, m.name, value, expiry))
+func (m *Mutex) touch(value string, expiry int) bool {
+	status, err := m.evalScript(touchScript, m.name, value)
 	return err == nil && status != "ERR"
 }
 
-func (m *Mutex) actOnPoolsAsync(actFn func(Pool) bool) int {
-	ch := make(chan bool)
-	for _, pool := range m.pools {
-		go func(pool Pool) {
-			ch <- actFn(pool)
-		}(pool)
+func (m *Mutex) evalScript(script *redis.Script, key string, args ...interface{}) (interface{}, error) {
+	keys := []string{m.name}
+
+	status, err := script.EvalSha(m.redisClient, keys, args...).Result()
+	if err != nil && strings.HasPrefix(err.Error(), "NOSCRIPT ") {
+		status, err = script.Eval(m.redisClient, keys, args...).Result()
 	}
-	n := 0
-	for range m.pools {
-		if <-ch {
-			n++
-		}
-	}
-	return n
+	return status, err
 }

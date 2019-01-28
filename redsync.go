@@ -1,29 +1,31 @@
 package redsync
 
-import "time"
+import (
+	"github.com/go-redis/redis"
+	"time"
+)
 
-// Redsync provides a simple method for creating distributed mutexes using multiple Redis connection pools.
-type Redsync struct {
-	pools []Pool
+// RedSync provides a simple method for creating distributed mutexes using multiple Redis connection pools.
+type RedSync struct {
+	redisClient *redis.Client
 }
 
-// New creates and returns a new Redsync instance from given Redis connection pools.
-func New(pools []Pool) *Redsync {
-	return &Redsync{
-		pools: pools,
+// New creates and returns a new RedSync instance from given Redis connection pools.
+func New(redisClient *redis.Client) *RedSync {
+	return &RedSync{
+		redisClient: redisClient,
 	}
 }
 
 // NewMutex returns a new distributed mutex with given name.
-func (r *Redsync) NewMutex(name string, options ...Option) *Mutex {
+func (r *RedSync) NewMutex(name string, options ...Option) *Mutex {
 	m := &Mutex{
-		name:      name,
-		expiry:    8 * time.Second,
-		tries:     32,
-		delayFunc: func(tries int) time.Duration { return 500 * time.Millisecond },
-		factor:    0.01,
-		quorum:    len(r.pools)/2 + 1,
-		pools:     r.pools,
+		name:        name,
+		expiry:      8 * time.Second,
+		tries:       32,
+		delayFunc:   func(tries int) time.Duration { return 500 * time.Millisecond },
+		factor:      0.01,
+		redisClient: r.redisClient,
 	}
 	for _, o := range options {
 		o.Apply(m)
