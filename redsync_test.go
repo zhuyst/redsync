@@ -7,26 +7,21 @@ import (
 	"github.com/stvp/tempredis"
 )
 
-var servers []*tempredis.Server
+var server *tempredis.Server
 
 func TestMain(m *testing.M) {
-	for i := 0; i < 8; i++ {
-		server, err := tempredis.Start(tempredis.Config{})
-		if err != nil {
-			panic(err)
-		}
-		servers = append(servers, server)
+	server, err := tempredis.Start(tempredis.Config{})
+	if err != nil {
+		panic(err)
 	}
 	result := m.Run()
-	for _, server := range servers {
-		server.Term()
-	}
+	server.Term()
 	os.Exit(result)
 }
 
 func TestRedsync(t *testing.T) {
-	pools := newMockPools(8)
-	rs := New(pools)
+	redisClient := newMockRedisClient()
+	rs := New(redisClient)
 
 	mutex := rs.NewMutex("test-redsync")
 	err := mutex.Lock()
@@ -34,5 +29,5 @@ func TestRedsync(t *testing.T) {
 
 	}
 
-	assertAcquired(t, pools, mutex)
+	assertAcquired(t, redisClient, mutex)
 }
