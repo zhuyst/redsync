@@ -23,7 +23,7 @@ func (r *RedSync) NewMutex(name string, options ...Option) *Mutex {
 		name:        name,
 		expiry:      8 * time.Second,
 		tries:       32,
-		delayFunc:   func(tries int) time.Duration { return 500 * time.Millisecond },
+		delayFunc:   func(_ int) time.Duration { return 500 * time.Millisecond },
 		factor:      0.01,
 		redisClient: r.redisClient,
 	}
@@ -63,7 +63,7 @@ func SetTries(tries int) Option {
 // SetRetryDelay can be used to set the amount of time to wait between retries.
 func SetRetryDelay(delay time.Duration) Option {
 	return OptionFunc(func(m *Mutex) {
-		m.delayFunc = func(tries int) time.Duration {
+		m.delayFunc = func(_ int) time.Duration {
 			return delay
 		}
 	})
